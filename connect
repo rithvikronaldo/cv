@@ -1,0 +1,157 @@
+from PIL import Image
+import numpy as np
+import matplotlib.pyplot as plt
+
+# -------------------------------------------------------
+# STEP 0: Load and convert to grayscale
+# -------------------------------------------------------
+img = Image.open("/boot/aic-home.jpg").convert("L")
+img_array = np.array(img)
+
+# -------------------------------------------------------
+# STEP 1: Histogram Equalization
+# -------------------------------------------------------
+hist, bins = np.histogram(img_array.flatten(), bins=256, range=[0,256])
+prob = hist / hist.sum()
+cdf = np.cumsum(prob)
+cdf_normalized = (cdf * 255).astype(np.uint8)
+equalized_array = cdf_normalized[img_array]
+equalized_img = Image.fromarray(equalized_array)
+
+# -------------------------------------------------------
+# STEP 2: Gray-Level Transformations
+# -------------------------------------------------------
+L = 256
+negative = (L - 1) - equalized_array
+
+# Gamma Transformation (γ = 0.5)
+gamma = 0.5
+c = 255 / (np.max(equalized_array) ** gamma)
+gamma_transformed = c * (equalized_array ** gamma)
+gamma_transformed = np.array(gamma_transformed, dtype=np.uint8)
+
+# -------------------------------------------------------
+# STEP 3: Edge Detection (Canny style with Sobel + NMS)
+# -------------------------------------------------------
+# Gaussian smoothing kernel
+gaussian_kernel = np.array([[1,2,1],[2,4,2],[1,2,1]]) / 16.0
+# Sobel kernels
+x = np.array([[-1,0,1],[-2,0,2],[-1,0,1]])
+y = np.array([[1,2,1],[0,0,0],[-1,-2,-1]])
+
+height, width = equalized_array.shape
+padded = np.pad(equalized_array, 1, mode="constant")
+# Gaussian filtering
+filtered = np.zeros_like(equalized_array)
+for i in range(height):
+    for j in range(width):
+        filtered[i,j] = np.sum(padded[i:i+3, j:j+3] * gaussian_kernel)
+
+# Gradient magnitude and angle
+padded_f = np.pad(filtered, 1, mode="constant")
+gx, gy, mag, angle = np.zeros((height,width)), np.zeros((height,width)), np.zeros((height,width)), np.zeros((height,width))
+for i in range(height):
+    for j in range(width):
+        region = padded_f[i:i+3, j:j+3]
+        gx[i,j] = np.sum(region * x)
+        gy[i,j] = np.sum(region * y)
+        mag[i,j] = np.sqrt(gx[i,j]**2 + gy[i,j]**2)
+        theta = np.arctan2(gy[i,j], gx[i,j]) * 180 / np.pi
+        angle[i,j] = theta if theta >= 0 else theta + 180
+
+# Normalize magnitude
+mag = (mag / mag.max()) * 255
+
+# Non-Maximum Suppression
+edge_map = np.zeros_like(mag)
+for i in range(1, height-1):
+    for j in range(1, width-1):
+        angle_deg = angle[i,j]
+        if (0 <= angle_deg < 22.5) or (157.5 <= angle_deg <= 180):
+            neighbors = [mag[i, j-1], mag[i, j+1]]
+        elif (22.5 <= angle_deg < 67.5):
+            neighbors = [mag[i-1, j+1], mag[i+1, j-1]]
+        elif (67.5 <= angle_deg < 112.5):
+            neighbors = [mag[i-1, j], mag[i+1, j]]
+        else:
+            neighbors = [mag[i-1, j-1], mag[i+1, j+1]]
+        edge_map[i,j] = mag[i,j] if mag[i,j] >= max(neighbors) else 0
+
+# Double thresholding
+high, low = 0.2*edge_map.max(), 0.1*edge_map.max()
+strong = (edge_map > high).astype(np.uint8)
+weak = ((edge_map >= low) & (edge_map <= high)).astype(np.uint8)
+binary_edges = strong + weak
+
+# -------------------------------------------------------
+# STEP 4: Connected Component Labeling
+# -------------------------------------------------------
+labels = np.zeros_like(binary_edges, dtype=np.int32)
+equiv = {}
+label = 0
+h, w = binary_edges.shape
+
+# Pass 1
+for i in range(h):
+    for j in range(w):
+        if binary_edges[i,j] == 1:
+            left, top = labels[i,j-1] if j>0 else 0, labels[i-1,j] if i>0 else 0
+            if left and top:
+                labels[i,j] = min(left, top)
+                if left != top:
+                    equiv[max(left,top)] = equiv.get(min(left,top), min(left,top))
+            elif left or top:
+                labels[i,j] = left if left else top
+            else:
+                label += 1
+                labels[i,j] = label
+                equiv[label] = label
+
+# Pass 2
+for i in range(h):
+    for j in range(w):
+        if labels[i,j] > 0:
+            labels[i,j] = equiv[labels[i,j]]
+
+# Normalize for visualization
+unique = np.unique(labels)
+map_labels = {val: idx for idx, val in enumerate(unique)}
+colored = np.vectorize(map_labels.get)(labels)
+
+# -------------------------------------------------------
+# Visualization of all stages
+# -------------------------------------------------------
+plt.figure(figsize=(15,10))
+
+plt.subplot(2,3,1)
+plt.imshow(img_array, cmap="gray")
+plt.title("Original Grayscale")
+plt.axis("off")
+
+plt.subplot(2,3,2)
+plt.imshow(equalized_array, cmap="gray")
+plt.title("Histogram Equalized")
+plt.axis("off")
+
+plt.subplot(2,3,3)
+plt.imshow(negative, cmap="gray")
+plt.title("Negative Transformation")
+plt.axis("off")
+
+plt.subplot(2,3,4)
+plt.imshow(gamma_transformed, cmap="gray")
+plt.title("Gamma Transformation (γ=0.5)")
+plt.axis("off")
+
+plt.subplot(2,3,5)
+plt.imshow(binary_edges, cmap="gray")
+plt.title("Canny-like Edges (Binary)")
+plt.axis("off")
+
+plt.subplot(2,3,6)
+plt.imshow(colored, cmap="tab20")
+plt.title("Connected Components")
+plt.axis("off")
+
+plt.tight_layout()
+plt.show()
